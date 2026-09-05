@@ -9,7 +9,11 @@ import time
 from datetime import datetime, timedelta
 
 import qrcode
+import uvicorn
 from pypdf import PdfReader
+from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 from telegram import (
     Update,
@@ -25,15 +29,18 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ContextTypes,
-    ConversationHandler,
     PreCheckoutQueryHandler,
+    ContextTypes,
     filters,
 )
 
 import database
 from ai import ask_ai
 
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -47,6 +54,10 @@ PRO_PRICE = int(
 
 PRO_DAYS = 30
 
+RENDER_PORT = int(
+    os.getenv("PORT", "10000")
+)
+
 LINK_PATTERN = re.compile(
     r"(https?://|www\.|t\.me/|telegram\.me/)",
     re.IGNORECASE
@@ -54,6 +65,62 @@ LINK_PATTERN = re.compile(
 
 SPAM_WINDOW = {}
 SPAM_LIMIT = 6
+
+
+# ============================================================
+# RENDER HEALTH SERVER
+# ============================================================
+
+async def health(request):
+    return PlainTextResponse(
+        "CypherBot is online 🤖",
+        status_code=200
+    )
+
+
+async def health_check(request):
+    return PlainTextResponse(
+        "OK",
+        status_code=200
+    )
+
+
+web_routes = [
+    Route("/", health),
+    Route("/health", health_check),
+]
+
+web_app = Starlette(
+    debug=False,
+    routes=web_routes
+)
+
+
+async def start_web_server():
+    """
+    Starts the small HTTP server required by Render.
+
+    Telegram still uses polling.
+    This server only keeps Render happy and provides
+    /health for monitoring.
+    """
+
+    config = uvicorn.Config(
+        web_app,
+        host="0.0.0.0",
+        port=RENDER_PORT,
+        log_level="info",
+        access_log=False,
+    )
+
+    server = uvicorn.Server(config)
+
+    print(
+        f"🌐 Render health server listening on "
+        f"0.0.0.0:{RENDER_PORT}"
+    )
+
+    await server.serve()
 
 
 # ============================================================
@@ -73,15 +140,23 @@ async def is_admin(update):
     chat = update.effective_chat
     user = update.effective_user
 
-    if not chat or chat.type not in ("group", "supergroup"):
+    if not chat or not user:
         return False
 
-    member = await chat.get_member(user.id)
+    if chat.type not in ("group", "supergroup"):
+        return False
 
-    return member.status in (
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.OWNER,
-    )
+    try:
+        member = await chat.get_member(user.id)
+
+        return member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        )
+
+    except Exception as exc:
+        print("ADMIN CHECK ERROR:", repr(exc))
+        return False
 
 
 async def require_admin(update):
@@ -90,14 +165,19 @@ async def require_admin(update):
         return True
 
     if update.message:
+
         await update.message.reply_text(
-            "⛔ This command is only available to group administrators."
+            "⛔ This command is only available "
+            "to group administrators."
         )
 
     return False
 
 
 def split_text(text, max_length=4000):
+
+    if not text:
+        return [""]
 
     return [
         text[i:i + max_length]
@@ -137,15 +217,20 @@ async def ai_request(
     user = update.effective_user
     chat = update.effective_chat
 
+    if not user or not chat:
+        return
+
     database.ensure_user(user)
 
     allowed, error = await can_use_ai(user.id)
 
     if not allowed:
-        await update.effective_message.reply_text(error)
-        return
 
-    used = database.consume_request(user.id)
+        await update.effective_message.reply_text(
+            error
+        )
+
+        return
 
     history = database.get_history(
         user.id,
@@ -155,7 +240,7 @@ async def ai_request(
 
     try:
 
-        await update.effective_message.reply_text(
+        thinking = await update.effective_message.reply_text(
             "🧠 Thinking..."
         )
 
@@ -163,6 +248,10 @@ async def ai_request(
             prompt,
             history,
             system_prompt
+        )
+
+        database.consume_request(
+            user.id
         )
 
         database.save_message(
@@ -179,6 +268,11 @@ async def ai_request(
             answer
         )
 
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+
         await send_long(
             update.effective_message,
             answer
@@ -186,7 +280,10 @@ async def ai_request(
 
     except Exception as exc:
 
-        print("AI ERROR:", repr(exc))
+        print(
+            "AI ERROR:",
+            repr(exc)
+        )
 
         await update.effective_message.reply_text(
             "⚠️ I couldn't process that request right now. "
@@ -200,7 +297,9 @@ async def ai_request(
 
 async def start(update, context):
 
-    database.ensure_user(update.effective_user)
+    database.ensure_user(
+        update.effective_user
+    )
 
     text = """
 🤖 *Welcome to CypherBot!*
@@ -213,6 +312,11 @@ Your all-in-one Telegram AI assistant.
 • /debug
 • /code
 • /explain
+
+📁 Files
+• PDF analysis
+• Text files
+• Code files
 
 🛠️ Developer
 • /json
@@ -292,6 +396,7 @@ async def help_command(update, context):
 💎 Premium
 /pro
 /myplan
+/paysupport
 
 Use /start for the main menu.
 """,
@@ -359,6 +464,7 @@ async def menu_callback(update, context):
             "/warn\n"
             "/warnings\n"
             "/mute\n"
+            "/unmute\n"
             "/ban\n"
             "/unban\n"
             "/antilink\n"
@@ -397,7 +503,7 @@ async def menu_callback(update, context):
 
 
 # ============================================================
-# AI
+# AI COMMANDS
 # ============================================================
 
 async def ask_command(update, context):
@@ -407,6 +513,7 @@ async def ask_command(update, context):
         await update.message.reply_text(
             "Usage:\n/ask Explain recursion in Python."
         )
+
         return
 
     await ai_request(
@@ -422,6 +529,7 @@ async def debug_command(update, context):
         await update.message.reply_text(
             "Usage:\n/debug <error>"
         )
+
         return
 
     prompt = (
@@ -431,7 +539,10 @@ async def debug_command(update, context):
         + " ".join(context.args)
     )
 
-    await ai_request(update, prompt)
+    await ai_request(
+        update,
+        prompt
+    )
 
 
 async def code_command(update, context):
@@ -441,6 +552,7 @@ async def code_command(update, context):
         await update.message.reply_text(
             "Usage:\n/code Create a Python calculator."
         )
+
         return
 
     prompt = (
@@ -448,7 +560,10 @@ async def code_command(update, context):
         + " ".join(context.args)
     )
 
-    await ai_request(update, prompt)
+    await ai_request(
+        update,
+        prompt
+    )
 
 
 async def explain_command(update, context):
@@ -458,6 +573,7 @@ async def explain_command(update, context):
         await update.message.reply_text(
             "Usage:\n/explain <code>"
         )
+
         return
 
     prompt = (
@@ -467,7 +583,10 @@ async def explain_command(update, context):
         + " ".join(context.args)
     )
 
-    await ai_request(update, prompt)
+    await ai_request(
+        update,
+        prompt
+    )
 
 
 # ============================================================
@@ -481,6 +600,7 @@ async def json_command(update, context):
         await update.message.reply_text(
             "Usage:\n/json {\"name\":\"Cypher\"}"
         )
+
         return
 
     raw = " ".join(context.args)
@@ -515,10 +635,14 @@ async def base64_command(update, context):
             "Usage:\n/base64 encode hello\n"
             "/base64 decode aGVsbG8="
         )
+
         return
 
     action = context.args[0].lower()
-    value = " ".join(context.args[1:])
+
+    value = " ".join(
+        context.args[1:]
+    )
 
     try:
 
@@ -539,6 +663,7 @@ async def base64_command(update, context):
             await update.message.reply_text(
                 "Use `encode` or `decode`."
             )
+
             return
 
         await send_long(
@@ -560,6 +685,7 @@ async def qr_command(update, context):
         await update.message.reply_text(
             "Usage:\n/qr https://example.com"
         )
+
         return
 
     value = " ".join(context.args)
@@ -568,7 +694,10 @@ async def qr_command(update, context):
 
     output = io.BytesIO()
 
-    image.save(output, format="PNG")
+    image.save(
+        output,
+        format="PNG"
+    )
 
     output.seek(0)
 
@@ -584,15 +713,20 @@ async def qr_command(update, context):
 
 async def group_setup(update):
 
-    if update.effective_chat.type not in (
+    chat = update.effective_chat
+
+    if not chat:
+        return
+
+    if chat.type not in (
         "group",
         "supergroup"
     ):
         return
 
     database.save_group(
-        update.effective_chat.id,
-        update.effective_chat.title
+        chat.id,
+        chat.title
     )
 
 
@@ -602,9 +736,11 @@ async def rules_command(update, context):
         "group",
         "supergroup"
     ):
+
         await update.message.reply_text(
             "📜 Group rules can only be used in groups."
         )
+
         return
 
     await group_setup(update)
@@ -642,6 +778,7 @@ async def setrules_command(update, context):
         await update.message.reply_text(
             "Usage:\n/setrules Be respectful. No spam."
         )
+
         return
 
     await group_setup(update)
@@ -662,24 +799,6 @@ async def setrules_command(update, context):
 # MODERATION
 # ============================================================
 
-async def get_target(update):
-
-    message = update.message
-
-    if message.reply_to_message:
-
-        return message.reply_to_message.from_user
-
-    if context_args := getattr(
-        update,
-        "_cypher_args",
-        None
-    ):
-        return None
-
-    return None
-
-
 async def warn_command(update, context):
 
     if not await require_admin(update):
@@ -690,9 +809,12 @@ async def warn_command(update, context):
         await update.message.reply_text(
             "Reply to a user's message with /warn [reason]."
         )
+
         return
 
-    target = update.message.reply_to_message.from_user
+    target = (
+        update.message.reply_to_message.from_user
+    )
 
     reason = (
         " ".join(context.args)
@@ -727,7 +849,10 @@ async def warn_command(update, context):
 
         except Exception as exc:
 
-            print("BAN ERROR:", exc)
+            print(
+                "BAN ERROR:",
+                repr(exc)
+            )
 
 
 async def warnings_command(update, context):
@@ -737,9 +862,12 @@ async def warnings_command(update, context):
         await update.message.reply_text(
             "Reply to a user's message with /warnings."
         )
+
         return
 
-    target = update.message.reply_to_message.from_user
+    target = (
+        update.message.reply_to_message.from_user
+    )
 
     count = database.warning_count(
         update.effective_chat.id,
@@ -761,9 +889,12 @@ async def mute_command(update, context):
         await update.message.reply_text(
             "Reply to a user's message with /mute."
         )
+
         return
 
-    target = update.message.reply_to_message.from_user
+    target = (
+        update.message.reply_to_message.from_user
+    )
 
     minutes = 10
 
@@ -783,31 +914,35 @@ async def mute_command(update, context):
         await update.effective_chat.restrict_member(
             target.id,
             permissions=ChatPermissions(
-                can_send_messages= False,
-                can_send_audios= False,
-                can_send_documents= False,
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
                 can_send_photos=False,
-                can_send_videos= False,
-                can_send_video_notes= False,
+                can_send_videos=False,
+                can_send_video_notes=False,
                 can_send_voice_notes=False,
-                can_send_polls= False,
-                can_send_other_messages= False,
-                can_add_web_page_previews= False,
-                can_change_info= False,
-                can_invite_users= False,
-                can_pin_messages= False,
-                can_manage_topics= False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+                can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False,
+                can_manage_topics=False,
             ),
             until_date=until
         )
 
         await update.message.reply_text(
-            f"🔇 {mention(target)} muted for {minutes} minutes."
+            f"🔇 {mention(target)} muted for "
+            f"{minutes} minutes."
         )
 
     except Exception as exc:
 
-        print("MUTE ERROR:", exc)
+        print(
+            "MUTE ERROR:",
+            repr(exc)
+        )
 
         await update.message.reply_text(
             "❌ I couldn't mute that user. "
@@ -825,26 +960,31 @@ async def unmute_command(update, context):
         await update.message.reply_text(
             "Reply to a user's message with /unmute."
         )
+
         return
 
-    target = update.message.reply_to_message.from_user
+    target = (
+        update.message.reply_to_message.from_user
+    )
 
     try:
 
         await update.effective_chat.restrict_member(
             target.id,
-            permissions= ChatPermissions(
-                can_send_messages= True,
-                can_send_audios= True,
-                can_send_documents= True,
-                can_send_photos= True,
-                can_send_videos= True,
-                can_send_video_notes= True,
-                can_send_voice_notes= True,
-                can_send_polls= True,
-                can_send_other_messages= True,
-                can_add_web_page_previews= True,
-                can_invite_users= True,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_invite_users=True,
+                can_pin_messages=True,
+                can_manage_topics=True,
             )
         )
 
@@ -854,7 +994,10 @@ async def unmute_command(update, context):
 
     except Exception as exc:
 
-        print("UNMUTE ERROR:", exc)
+        print(
+            "UNMUTE ERROR:",
+            repr(exc)
+        )
 
 
 async def ban_command(update, context):
@@ -867,9 +1010,12 @@ async def ban_command(update, context):
         await update.message.reply_text(
             "Reply to a user's message with /ban."
         )
+
         return
 
-    target = update.message.reply_to_message.from_user
+    target = (
+        update.message.reply_to_message.from_user
+    )
 
     try:
 
@@ -883,7 +1029,10 @@ async def ban_command(update, context):
 
     except Exception as exc:
 
-        print("BAN ERROR:", exc)
+        print(
+            "BAN ERROR:",
+            repr(exc)
+        )
 
 
 async def unban_command(update, context):
@@ -896,9 +1045,12 @@ async def unban_command(update, context):
         await update.message.reply_text(
             "Reply to a user's message with /unban."
         )
+
         return
 
-    target = update.message.reply_to_message.from_user
+    target = (
+        update.message.reply_to_message.from_user
+    )
 
     try:
 
@@ -913,7 +1065,10 @@ async def unban_command(update, context):
 
     except Exception as exc:
 
-        print("UNBAN ERROR:", exc)
+        print(
+            "UNBAN ERROR:",
+            repr(exc)
+        )
 
 
 # ============================================================
@@ -936,7 +1091,8 @@ async def set_setting(chat_id, column, value):
     with sqlite3.connect(database.DB_FILE) as db:
 
         db.execute(
-            f"UPDATE groups SET {column}=? WHERE chat_id=?",
+            f"UPDATE groups SET {column}=? "
+            "WHERE chat_id=?",
             (value, chat_id)
         )
 
@@ -962,7 +1118,8 @@ async def antilink_command(update, context):
     )
 
     await update.message.reply_text(
-        f"🔗 Anti-link: {'ON' if value else 'OFF'}"
+        f"🔗 Anti-link: "
+        f"{'ON' if value else 'OFF'}"
     )
 
 
@@ -985,7 +1142,8 @@ async def antispam_command(update, context):
     )
 
     await update.message.reply_text(
-        f"🚫 Anti-spam: {'ON' if value else 'OFF'}"
+        f"🚫 Anti-spam: "
+        f"{'ON' if value else 'OFF'}"
     )
 
 
@@ -1008,7 +1166,8 @@ async def reaction_command(update, context):
     )
 
     await update.message.reply_text(
-        f"❤️ Auto reactions: {'ON' if value else 'OFF'}"
+        f"❤️ Auto reactions: "
+        f"{'ON' if value else 'OFF'}"
     )
 
 
@@ -1050,10 +1209,19 @@ async def monitor_message(update, context):
 
     chat = update.effective_chat
 
-    if chat.type not in ("group", "supergroup"):
+    if not chat:
+        return
 
-        # Normal private-chat AI
-        if message.text and not message.text.startswith("/"):
+    # --------------------------------------------------------
+    # PRIVATE CHAT
+    # --------------------------------------------------------
+
+    if chat.type == "private":
+
+        if (
+            message.text
+            and not message.text.startswith("/")
+        ):
 
             await ai_request(
                 update,
@@ -1062,19 +1230,38 @@ async def monitor_message(update, context):
 
         return
 
+    # --------------------------------------------------------
+    # GROUP
+    # --------------------------------------------------------
+
+    if chat.type not in (
+        "group",
+        "supergroup"
+    ):
+
+        return
+
     await group_setup(update)
 
-    group = database.get_group(chat.id)
+    group = database.get_group(
+        chat.id
+    )
 
     # XP
-    database.add_xp(user.id, 1)
+    database.add_xp(
+        user.id,
+        1
+    )
 
-    # Ignore administrators for moderation
+    # Check admin
     admin = await is_admin(update)
 
     if not admin and group:
 
-        # Anti-link
+        # ----------------------------------------------------
+        # ANTI-LINK
+        # ----------------------------------------------------
+
         if (
             group["anti_link"]
             and message.text
@@ -1086,16 +1273,23 @@ async def monitor_message(update, context):
                 await message.delete()
 
                 await chat.send_message(
-                    f"🔗 {mention(user)}, links aren't allowed here."
+                    f"🔗 {mention(user)}, "
+                    "links aren't allowed here."
                 )
 
             except Exception as exc:
 
-                print("ANTI-LINK ERROR:", exc)
+                print(
+                    "ANTI-LINK ERROR:",
+                    repr(exc)
+                )
 
             return
 
-        # Anti-spam
+        # ----------------------------------------------------
+        # ANTI-SPAM
+        # ----------------------------------------------------
+
         if group["anti_spam"]:
 
             now = time.time()
@@ -1118,27 +1312,35 @@ async def monitor_message(update, context):
 
                     await chat.restrict_member(
                         user.id,
-                        permissions={
-                            "can_send_messages": False
-                        },
-                        until_date=datetime.now()
-                        + timedelta(minutes=1)
+                        permissions=ChatPermissions(
+                            can_send_messages=False
+                        ),
+                        until_date=(
+                            datetime.now()
+                            + timedelta(minutes=1)
+                        )
                     )
 
                     await chat.send_message(
-                        f"🚫 {mention(user)} was temporarily "
-                        "muted for spam."
+                        f"🚫 {mention(user)} was "
+                        "temporarily muted for spam."
                     )
 
                     history.clear()
 
                 except Exception as exc:
 
-                    print("ANTI-SPAM ERROR:", exc)
+                    print(
+                        "ANTI-SPAM ERROR:",
+                        repr(exc)
+                    )
 
                 return
 
-    # Auto reaction
+    # --------------------------------------------------------
+    # AUTO REACTION
+    # --------------------------------------------------------
+
     if (
         group
         and group["auto_reaction"]
@@ -1150,23 +1352,36 @@ async def monitor_message(update, context):
             await context.bot.set_message_reaction(
                 chat_id=chat.id,
                 message_id=message.message_id,
-                reaction=[{"type": "emoji", "emoji": group["reaction"]}]
+                reaction=[
+                    {
+                        "type": "emoji",
+                        "emoji": group["reaction"]
+                    }
+                ]
             )
 
         except Exception as exc:
 
-            print("REACTION ERROR:", exc)
+            print(
+                "REACTION ERROR:",
+                repr(exc)
+            )
 
-    # If bot is mentioned, answer with AI
+    # --------------------------------------------------------
+    # BOT MENTION
+    # --------------------------------------------------------
+
+    bot_username = context.bot.username
+
     if (
         message.text
-        and context.bot.username
-        and f"@{context.bot.username}".lower()
+        and bot_username
+        and f"@{bot_username}".lower()
         in message.text.lower()
     ):
 
         cleaned = re.sub(
-            rf"@{re.escape(context.bot.username)}",
+            rf"@{re.escape(bot_username)}",
             "",
             message.text,
             flags=re.IGNORECASE
@@ -1193,11 +1408,18 @@ async def file_handler(update, context):
 
     user = update.effective_user
 
-    allowed, error = await can_use_ai(user.id)
+    database.ensure_user(user)
+
+    allowed, error = await can_use_ai(
+        user.id
+    )
 
     if not allowed:
 
-        await update.message.reply_text(error)
+        await update.message.reply_text(
+            error
+        )
+
         return
 
     await update.message.reply_text(
@@ -1210,7 +1432,14 @@ async def file_handler(update, context):
 
         data = await telegram_file.download_as_bytearray()
 
-        filename = document.file_name or "file"
+        filename = (
+            document.file_name
+            or "file"
+        )
+
+        # ----------------------------------------------------
+        # PDF
+        # ----------------------------------------------------
 
         if filename.lower().endswith(".pdf"):
 
@@ -1223,10 +1452,24 @@ async def file_handler(update, context):
                 for page in reader.pages
             )
 
+        # ----------------------------------------------------
+        # TEXT / CODE
+        # ----------------------------------------------------
+
         elif filename.lower().endswith(
-            (".txt", ".py", ".js", ".ts", ".html",
-             ".css", ".json", ".md", ".java",
-             ".c", ".cpp")
+            (
+                ".txt",
+                ".py",
+                ".js",
+                ".ts",
+                ".html",
+                ".css",
+                ".json",
+                ".md",
+                ".java",
+                ".c",
+                ".cpp"
+            )
         ):
 
             text = bytes(data).decode(
@@ -1237,8 +1480,10 @@ async def file_handler(update, context):
         else:
 
             await update.message.reply_text(
-                "⚠️ I currently support PDF, TXT and common code files."
+                "⚠️ I currently support PDF, TXT "
+                "and common code files."
             )
+
             return
 
         text = text[:30000]
@@ -1248,9 +1493,13 @@ async def file_handler(update, context):
             f"{text}"
         )
 
-        database.consume_request(user.id)
+        answer = await ask_ai(
+            prompt
+        )
 
-        answer = await ask_ai(prompt)
+        database.consume_request(
+            user.id
+        )
 
         await send_long(
             update.message,
@@ -1259,7 +1508,10 @@ async def file_handler(update, context):
 
     except Exception as exc:
 
-        print("FILE ERROR:", repr(exc))
+        print(
+            "FILE ERROR:",
+            repr(exc)
+        )
 
         await update.message.reply_text(
             "❌ I couldn't analyze that file."
@@ -1298,7 +1550,10 @@ async def dice(update, context):
 async def coinflip(update, context):
 
     result = random.choice(
-        ["🪙 Heads!", "🪙 Tails!"]
+        [
+            "🪙 Heads!",
+            "🪙 Tails!"
+        ]
     )
 
     await update.message.reply_text(
@@ -1320,7 +1575,10 @@ def parse_duration(value):
     if not match:
         return None
 
-    number = int(match.group(1))
+    number = int(
+        match.group(1)
+    )
+
     unit = match.group(2)
 
     multipliers = {
@@ -1330,7 +1588,10 @@ def parse_duration(value):
         "d": 86400
     }
 
-    return number * multipliers[unit]
+    return (
+        number
+        * multipliers[unit]
+    )
 
 
 async def remind_command(update, context):
@@ -1338,8 +1599,10 @@ async def remind_command(update, context):
     if len(context.args) < 2:
 
         await update.message.reply_text(
-            "Usage:\n/remind 30m Download the firmware"
+            "Usage:\n"
+            "/remind 30m Download the firmware"
         )
+
         return
 
     duration = parse_duration(
@@ -1349,8 +1612,10 @@ async def remind_command(update, context):
     if not duration:
 
         await update.message.reply_text(
-            "Use a duration like 30s, 10m, 2h or 1d."
+            "Use a duration like "
+            "30s, 10m, 2h or 1d."
         )
+
         return
 
     message = " ".join(
@@ -1365,32 +1630,45 @@ async def remind_command(update, context):
     )
 
     await update.message.reply_text(
-        f"⏰ Reminder set for {context.args[0]}."
+        f"⏰ Reminder set for "
+        f"{context.args[0]}."
     )
 
 
 async def reminder_worker(context):
 
-    reminders = database.get_due_reminders()
+    try:
 
-    for reminder in reminders:
+        reminders = database.get_due_reminders()
 
-        try:
+        for reminder in reminders:
 
-            await context.bot.send_message(
-                reminder["chat_id"],
-                "⏰ *Reminder*\n\n"
-                + reminder["message"],
-                parse_mode="Markdown"
-            )
+            try:
 
-            database.mark_reminder_sent(
-                reminder["id"]
-            )
+                await context.bot.send_message(
+                    reminder["chat_id"],
+                    "⏰ *Reminder*\n\n"
+                    + reminder["message"],
+                    parse_mode="Markdown"
+                )
 
-        except Exception as exc:
+                database.mark_reminder_sent(
+                    reminder["id"]
+                )
 
-            print("REMINDER ERROR:", exc)
+            except Exception as exc:
+
+                print(
+                    "REMINDER ERROR:",
+                    repr(exc)
+                )
+
+    except Exception as exc:
+
+        print(
+            "REMINDER WORKER ERROR:",
+            repr(exc)
+        )
 
 
 # ============================================================
@@ -1407,7 +1685,9 @@ async def myplan_command(update, context):
         update.effective_user.id
     )
 
-    if database.is_pro(user["user_id"]):
+    if database.is_pro(
+        user["user_id"]
+    ):
 
         expiry = datetime.fromtimestamp(
             user["pro_until"]
@@ -1416,7 +1696,8 @@ async def myplan_command(update, context):
         await update.message.reply_text(
             f"💎 *PRO*\n\n"
             f"Expires: {expiry}\n"
-            f"Requests today: {user['requests_today']}",
+            f"Requests today: "
+            f"{user['requests_today']}",
             parse_mode="Markdown"
         )
 
@@ -1428,7 +1709,8 @@ async def myplan_command(update, context):
 
         await update.message.reply_text(
             f"🆓 *FREE*\n\n"
-            f"AI requests today: {used}/{FREE_DAILY_LIMIT}\n\n"
+            f"AI requests today: "
+            f"{used}/{FREE_DAILY_LIMIT}\n\n"
             "Use /pro to upgrade.",
             parse_mode="Markdown"
         )
@@ -1447,11 +1729,13 @@ async def pro_command(update, context):
         await update.message.reply_text(
             "💎 You're already a PRO member."
         )
+
         return
 
     payload = (
-        f"cypher_pro_{update.effective_user.id}"
-        f"_{int(time.time())}"
+        f"cypher_pro_"
+        f"{update.effective_user.id}_"
+        f"{int(time.time())}"
     )
 
     prices = [
@@ -1465,7 +1749,8 @@ async def pro_command(update, context):
         title="CypherBot PRO",
         description=(
             "30 days of CypherBot PRO "
-            "with higher AI limits and advanced features."
+            "with higher AI limits and "
+            "advanced features."
         ),
         payload=payload,
         currency="XTR",
@@ -1484,28 +1769,37 @@ async def precheckout(update, context):
         await query.answer(
             ok=False,
             error_message=(
-                "CypherBot PRO payments must use Telegram Stars."
+                "CypherBot PRO payments must "
+                "use Telegram Stars."
             )
         )
+
         return
 
-    await query.answer(ok=True)
+    await query.answer(
+        ok=True
+    )
 
 
 async def successful_payment(update, context):
 
-    payment = update.message.successful_payment
+    payment = (
+        update.message.successful_payment
+    )
 
     user_id = update.effective_user.id
 
     now = int(time.time())
 
-    expiry = payment.subscription_expiration_date
+    expiry = (
+        payment.subscription_expiration_date
+    )
 
     if not expiry:
 
-        expiry = now + (
-            PRO_DAYS * 86400
+        expiry = (
+            now
+            + PRO_DAYS * 86400
         )
 
     database.activate_pro(
@@ -1524,7 +1818,7 @@ async def successful_payment(update, context):
     await update.message.reply_text(
         "🎉 *Payment successful!*\n\n"
         "💎 CypherBot PRO is now active.\n\n"
-        f"Valid until: "
+        "Valid until: "
         f"{datetime.fromtimestamp(expiry).strftime('%Y-%m-%d')}\n\n"
         "Use /myplan to view your plan.",
         parse_mode="Markdown"
@@ -1535,8 +1829,9 @@ async def paysupport(update, context):
 
     await update.message.reply_text(
         "💳 *Payment Support*\n\n"
-        "If you have a problem with a CypherBot payment, "
-        "please contact the bot owner with your Telegram "
+        "If you have a problem with a "
+        "CypherBot payment, please contact "
+        "the bot owner with your Telegram "
         "username and payment details.\n\n"
         "Never send passwords or API keys.",
         parse_mode="Markdown"
@@ -1556,10 +1851,10 @@ async def error_handler(update, context):
 
 
 # ============================================================
-# MAIN
+# BUILD BOT APPLICATION
 # ============================================================
 
-def main():
+def build_application():
 
     if not BOT_TOKEN:
 
@@ -1575,132 +1870,244 @@ def main():
         .build()
     )
 
-    # Basic
+    # ========================================================
+    # BASIC
+    # ========================================================
+
     application.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     application.add_handler(
-        CommandHandler("help", help_command)
+        CommandHandler(
+            "help",
+            help_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("menu", menu)
+        CommandHandler(
+            "menu",
+            menu
+        )
     )
 
     application.add_handler(
-        CallbackQueryHandler(menu_callback)
+        CallbackQueryHandler(
+            menu_callback
+        )
     )
 
+    # ========================================================
     # AI
+    # ========================================================
+
     application.add_handler(
-        CommandHandler("ask", ask_command)
+        CommandHandler(
+            "ask",
+            ask_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("debug", debug_command)
+        CommandHandler(
+            "debug",
+            debug_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("code", code_command)
+        CommandHandler(
+            "code",
+            code_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("explain", explain_command)
+        CommandHandler(
+            "explain",
+            explain_command
+        )
     )
 
-    # Developer
-    application.add_handler(
-        CommandHandler("json", json_command)
-    )
+    # ========================================================
+    # DEVELOPER
+    # ========================================================
 
     application.add_handler(
-        CommandHandler("base64", base64_command)
-    )
-
-    application.add_handler(
-        CommandHandler("qr", qr_command)
-    )
-
-    # Groups
-    application.add_handler(
-        CommandHandler("rules", rules_command)
+        CommandHandler(
+            "json",
+            json_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("setrules", setrules_command)
+        CommandHandler(
+            "base64",
+            base64_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("warn", warn_command)
+        CommandHandler(
+            "qr",
+            qr_command
+        )
+    )
+
+    # ========================================================
+    # GROUP MANAGEMENT
+    # ========================================================
+
+    application.add_handler(
+        CommandHandler(
+            "rules",
+            rules_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("warnings", warnings_command)
+        CommandHandler(
+            "setrules",
+            setrules_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("mute", mute_command)
+        CommandHandler(
+            "warn",
+            warn_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("unmute", unmute_command)
+        CommandHandler(
+            "warnings",
+            warnings_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("ban", ban_command)
+        CommandHandler(
+            "mute",
+            mute_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("unban", unban_command)
+        CommandHandler(
+            "unmute",
+            unmute_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("antilink", antilink_command)
+        CommandHandler(
+            "ban",
+            ban_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("antispam", antispam_command)
+        CommandHandler(
+            "unban",
+            unban_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("reaction", reaction_command)
-    )
-
-    # Fun
-    application.add_handler(
-        CommandHandler("8ball", eight_ball)
-    )
-
-    application.add_handler(
-        CommandHandler("dice", dice)
+        CommandHandler(
+            "antilink",
+            antilink_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("coinflip", coinflip)
-    )
-
-    # Automation
-    application.add_handler(
-        CommandHandler("remind", remind_command)
-    )
-
-    # Plans
-    application.add_handler(
-        CommandHandler("pro", pro_command)
+        CommandHandler(
+            "antispam",
+            antispam_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("myplan", myplan_command)
+        CommandHandler(
+            "reaction",
+            reaction_command
+        )
+    )
+
+    # ========================================================
+    # FUN
+    # ========================================================
+
+    application.add_handler(
+        CommandHandler(
+            "8ball",
+            eight_ball
+        )
     )
 
     application.add_handler(
-        CommandHandler("paysupport", paysupport)
+        CommandHandler(
+            "dice",
+            dice
+        )
     )
 
-    # Payments
     application.add_handler(
-        PreCheckoutQueryHandler(precheckout)
+        CommandHandler(
+            "coinflip",
+            coinflip
+        )
+    )
+
+    # ========================================================
+    # AUTOMATION
+    # ========================================================
+
+    application.add_handler(
+        CommandHandler(
+            "remind",
+            remind_command
+        )
+    )
+
+    # ========================================================
+    # PLANS
+    # ========================================================
+
+    application.add_handler(
+        CommandHandler(
+            "pro",
+            pro_command
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "myplan",
+            myplan_command
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "paysupport",
+            paysupport
+        )
+    )
+
+    # ========================================================
+    # PAYMENTS
+    # ========================================================
+
+    application.add_handler(
+        PreCheckoutQueryHandler(
+            precheckout
+        )
     )
 
     application.add_handler(
@@ -1710,7 +2117,10 @@ def main():
         )
     )
 
-    # Welcome
+    # ========================================================
+    # WELCOME
+    # ========================================================
+
     application.add_handler(
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
@@ -1718,7 +2128,10 @@ def main():
         )
     )
 
-    # Files
+    # ========================================================
+    # FILES
+    # ========================================================
+
     application.add_handler(
         MessageHandler(
             filters.Document.ALL,
@@ -1726,7 +2139,10 @@ def main():
         )
     )
 
-    # Messages
+    # ========================================================
+    # NORMAL MESSAGES
+    # ========================================================
+
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -1734,23 +2150,149 @@ def main():
         )
     )
 
+    # ========================================================
+    # ERRORS
+    # ========================================================
+
     application.add_error_handler(
         error_handler
     )
 
-    # Reminder job
-    application.job_queue.run_repeating(
-        reminder_worker,
-        interval=10,
-        first=10
+    # ========================================================
+    # REMINDER JOB
+    # ========================================================
+
+    if application.job_queue:
+
+        application.job_queue.run_repeating(
+            reminder_worker,
+            interval=10,
+            first=10
+        )
+
+        print(
+            "⏰ Reminder system enabled."
+        )
+
+    else:
+
+        print(
+            "⚠️ JobQueue is unavailable. "
+            "Install python-telegram-bot[job-queue]."
+        )
+
+    return application
+
+
+# ============================================================
+# RUN TELEGRAM BOT
+# ============================================================
+
+async def run_telegram_bot(application):
+
+    print(
+        "🤖 Starting CypherBot..."
     )
 
-    print("🤖 CypherBot is running...")
+    await application.initialize()
 
-    application.run_polling(
+    await application.start()
+
+    await application.updater.start_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
+    print(
+        "🤖 CypherBot is running..."
+    )
+
+    try:
+
+        while True:
+
+            await asyncio.sleep(
+                3600
+            )
+
+    except asyncio.CancelledError:
+
+        pass
+
+    finally:
+
+        print(
+            "🛑 Stopping CypherBot..."
+        )
+
+        try:
+            await application.updater.stop()
+        except Exception as exc:
+            print(
+                "UPDATER STOP ERROR:",
+                repr(exc)
+            )
+
+        try:
+            await application.stop()
+        except Exception as exc:
+            print(
+                "APPLICATION STOP ERROR:",
+                repr(exc)
+            )
+
+        try:
+            await application.shutdown()
+        except Exception as exc:
+            print(
+                "APPLICATION SHUTDOWN ERROR:",
+                repr(exc)
+            )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    application = build_application()
+
+    web_task = asyncio.create_task(
+        start_web_server()
+    )
+
+    bot_task = asyncio.create_task(
+        run_telegram_bot(application)
+    )
+
+    done, pending = await asyncio.wait(
+        [web_task, bot_task],
+        return_when=asyncio.FIRST_EXCEPTION
+    )
+
+    for task in pending:
+
+        task.cancel()
+
+    for task in done:
+
+        exception = task.exception()
+
+        if exception:
+
+            raise exception
+
 
 if __name__ == "__main__":
-    main()
+
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        print(
+            "👋 CypherBot stopped."
+        )
