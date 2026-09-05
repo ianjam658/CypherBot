@@ -2196,6 +2196,12 @@ async def run_telegram_bot(application):
 
     await application.initialize()
 
+    # Clear any leftover webhook so polling isn't blocked by a
+    # "Conflict: terminated by other getUpdates request" error.
+    await application.bot.delete_webhook(
+        drop_pending_updates=True
+    )
+
     await application.start()
 
     await application.updater.start_polling(
