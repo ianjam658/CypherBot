@@ -1,4 +1,4 @@
-python-telegram-bot>=22.8,<23
+python-telegram-bot[job-queue]>=22,<23
 aiohttp>=3.9
 pypdf>=5.0
 qrcode[pil]>=8.0
