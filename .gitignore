@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+
+cypherbot.db
+
+.venv/
+venv/
+env/
+
+.idea/
+.vscode/
+
+.DS_Store
