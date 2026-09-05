@@ -16,7 +16,9 @@ from telegram import (
     LabeledPrice,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    ChatPermissions,
 )
+
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -780,7 +782,7 @@ async def mute_command(update, context):
 
         await update.effective_chat.restrict_member(
             target.id,
-            permissions={
+            permissions=ChatPermissions{
                 "can_send_messages": False,
                 "can_send_audios": False,
                 "can_send_documents": False,
@@ -831,7 +833,7 @@ async def unmute_command(update, context):
 
         await update.effective_chat.restrict_member(
             target.id,
-            permissions={
+            permissions= ChatPermissions{
                 "can_send_messages": True,
                 "can_send_audios": True,
                 "can_send_documents": True,
