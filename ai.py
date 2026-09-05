@@ -2,50 +2,51 @@ import os
 import aiohttp
 
 
-AI_API_URL = os.getenv("AI_API_URL")
-AI_API_KEY = os.getenv("AI_API_KEY")
-AI_MODEL = os.getenv("AI_MODEL", "default")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+GROQ_MODEL = os.getenv(
+    "GROQ_MODEL",
+    "openai/gpt-oss-120b"
+)
 
 
 async def ask_ai(question: str) -> str:
-    """
-    Sends a question to an OpenAI-compatible API.
+    """Send a question to Groq and return the AI response."""
 
-    The provider can be changed later without
-    changing the rest of CypherBot.
-    """
-
-    if not AI_API_URL:
-        return (
-            "⚠️ AI is not configured yet.\n\n"
-            "The Telegram bot itself is working correctly.\n"
-            "We just need to connect a free AI provider."
+    if not GROQ_API_KEY:
+        raise RuntimeError(
+            "GROQ_API_KEY is not configured."
         )
 
     headers = {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
     }
 
-    if AI_API_KEY:
-        headers["Authorization"] = f"Bearer {AI_API_KEY}"
-
     payload = {
-        "model": AI_MODEL,
+        "model": GROQ_MODEL,
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "You are CypherBot, a helpful Telegram AI assistant. "
-                    "Be concise, accurate, and helpful. "
-                    "Use Markdown when useful."
-                )
+                    "You are CypherBot, a helpful and intelligent "
+                    "Telegram AI assistant. "
+                    "Answer clearly and accurately. "
+                    "Help users with programming, debugging, "
+                    "writing, translation, learning, and general "
+                    "questions. "
+                    "Use Markdown formatting when useful."
+                ),
             },
             {
                 "role": "user",
-                "content": question
-            }
+                "content": question,
+            },
         ],
-        "temperature": 0.7
+        "temperature": 0.7,
+        "max_tokens": 4096,
     }
 
     timeout = aiohttp.ClientTimeout(total=90)
@@ -55,18 +56,25 @@ async def ask_ai(question: str) -> str:
     ) as session:
 
         async with session.post(
-            AI_API_URL,
+            GROQ_API_URL,
             headers=headers,
-            json=payload
+            json=payload,
         ) as response:
 
             if response.status != 200:
-                error = await response.text()
+                error_text = await response.text()
 
                 raise RuntimeError(
-                    f"AI API error {response.status}: {error}"
+                    f"Groq API error {response.status}: "
+                    f"{error_text}"
                 )
 
             data = await response.json()
 
-            return data["choices"][0]["message"]["content"]
+            try:
+                return data["choices"][0]["message"]["content"]
+
+            except (KeyError, IndexError):
+                raise RuntimeError(
+                    "Unexpected response from Groq API."
+                )
