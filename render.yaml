@@ -19,3 +19,27 @@ services:
 
       - key: FREE_DAILY_LIMIT
         value: "10"
+
+      - key: PRO_PRICE_STARS
+        value: "100"
+services:
+  - type: web
+    name: cypherbot
+    runtime: python
+
+    buildCommand: pip install -r requirements.txt
+
+    startCommand: python bot.py
+
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: GROQ_API_KEY
+        sync: false
+
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+
+      - key: FREE_DAILY_LIMIT
+        value: "10"
