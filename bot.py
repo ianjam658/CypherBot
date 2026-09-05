@@ -782,7 +782,7 @@ async def mute_command(update, context):
 
         await update.effective_chat.restrict_member(
             target.id,
-            permissions=ChatPermissions{
+            permissions=ChatPermissions(
                 "can_send_messages": False,
                 "can_send_audios": False,
                 "can_send_documents": False,
@@ -797,7 +797,7 @@ async def mute_command(update, context):
                 "can_invite_users": False,
                 "can_pin_messages": False,
                 "can_manage_topics": False,
-            },
+            ),
             until_date=until
         )
 
@@ -833,7 +833,7 @@ async def unmute_command(update, context):
 
         await update.effective_chat.restrict_member(
             target.id,
-            permissions= ChatPermissions{
+            permissions= ChatPermissions(
                 "can_send_messages": True,
                 "can_send_audios": True,
                 "can_send_documents": True,
@@ -845,7 +845,7 @@ async def unmute_command(update, context):
                 "can_send_other_messages": True,
                 "can_add_web_page_previews": True,
                 "can_invite_users": True,
-            }
+            )
         )
 
         await update.message.reply_text(
