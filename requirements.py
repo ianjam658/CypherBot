@@ -1,3 +1,0 @@
-python-telegram-bot>=22,<23
-aiohttp>=3.9
-qrcode[pil]>=7.4
