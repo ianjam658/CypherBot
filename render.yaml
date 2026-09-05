@@ -2,21 +2,20 @@ services:
   - type: web
     name: cypherbot
     runtime: python
+
     buildCommand: pip install -r requirements.txt
+
     startCommand: python bot.py
 
     envVars:
       - key: BOT_TOKEN
         sync: false
 
-      - key: AI_API_URL
+      - key: GROQ_API_KEY
         sync: false
 
-      - key: AI_API_KEY
-        sync: false
-
-      - key: AI_MODEL
-        value: default
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
 
       - key: FREE_DAILY_LIMIT
         value: "10"
