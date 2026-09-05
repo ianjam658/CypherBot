@@ -1,11 +1,8 @@
 import os
 import aiohttp
 
-
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 GROQ_MODEL = os.getenv(
     "GROQ_MODEL",
     "openai/gpt-oss-120b"
@@ -27,7 +24,6 @@ async def ask_ai(
     if system_prompt is None:
         system_prompt = """
 You are CypherBot, an advanced Telegram AI assistant.
-
 You help users with:
 - programming
 - debugging
@@ -38,9 +34,7 @@ You help users with:
 - learning
 - general questions
 - document analysis
-
 Be accurate, helpful and concise.
-
 When providing code, use Markdown code blocks.
 Do not claim you performed an action when you did not.
 """
@@ -82,7 +76,9 @@ Do not claim you performed an action when you did not.
         ) as response:
 
             if response.status != 200:
+
                 error = await response.text()
+
                 raise RuntimeError(
                     f"AI service error {response.status}: {error}"
                 )
